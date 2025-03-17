@@ -16,13 +16,15 @@ import {
   EyeOff,
   TerminalIcon,
   Folder,
-  Share2,
   Sparkles,
   Loader2,
   Code,
   Zap,
   HelpCircle,
+  LogOut,
 } from "lucide-react"
+import { useAuth } from "@/components/auth-provider"
+import { useRouter } from "next/navigation"
 
 interface ToolbarProps {
   language: string
@@ -40,7 +42,6 @@ interface ToolbarProps {
   onAIAssist: (action: string) => void
   onExport: () => void
   onImport: () => void
-  onShare: () => void
 }
 
 export function Toolbar({
@@ -59,9 +60,19 @@ export function Toolbar({
   onAIAssist,
   onExport,
   onImport,
-  onShare,
 }: ToolbarProps) {
+  const { signOut } = useAuth()
+  const router = useRouter()
   const [showFontSizeSlider, setShowFontSizeSlider] = useState(false)
+
+  const handleSignOut = async () => {
+    try {
+      await signOut()
+      router.push("/auth/signin")
+    } catch (error) {
+      console.error("Sign out error:", error)
+    }
+  }
 
   return (
     <div className="flex items-center justify-between p-2 border-b border-gray-200 dark:border-gray-700 bg-background">
@@ -228,12 +239,12 @@ export function Toolbar({
         <TooltipProvider>
           <Tooltip>
             <TooltipTrigger asChild>
-              <Button variant="outline" size="icon" onClick={onShare}>
-                <Share2 className="h-4 w-4" />
+              <Button variant="outline" size="icon" onClick={handleSignOut}>
+                <LogOut className="h-4 w-4" />
               </Button>
             </TooltipTrigger>
             <TooltipContent>
-              <p>Share Code</p>
+              <p>Sign Out</p>
             </TooltipContent>
           </Tooltip>
         </TooltipProvider>

@@ -21,27 +21,6 @@ const languageConfigs = {
     extension: "py",
     command: "python",
   },
-  ruby: {
-    extension: "rb",
-    command: "ruby",
-  },
-  go: {
-    extension: "go",
-    command: "go run",
-  },
-  java: {
-    extension: "java",
-    // For Java, we need special handling for class name
-    command: "javac {filename} && java {classname}",
-  },
-  cpp: {
-    extension: "cpp",
-    command: "g++ {filename} -o {executable} && ./{executable}",
-  },
-  php: {
-    extension: "php",
-    command: "php",
-  },
 }
 
 export async function POST(request: NextRequest) {
@@ -58,6 +37,40 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ output: `Language '${language}' is not supported for execution.` }, { status: 200 })
     }
 
+    // For JavaScript, we can use a simple eval in a try-catch
+    if (language === "javascript") {
+      try {
+        // Create a function from the code to capture console.log output
+        let output = ""
+        const originalConsoleLog = console.log
+        console.log = (...args) => {
+          output += args.join(" ") + "\n"
+        }
+
+        // Execute the code
+        const func = new Function(code)
+        func()
+
+        // Restore console.log
+        console.log = originalConsoleLog
+
+        return NextResponse.json(
+          {
+            output: output || "Code executed successfully with no output.",
+          },
+          { status: 200 },
+        )
+      } catch (error) {
+        return NextResponse.json(
+          {
+            output: `Error: ${error.message}`,
+          },
+          { status: 200 },
+        )
+      }
+    }
+
+    // For other languages, we need to create a file and execute it
     // Create a temporary directory for execution
     const sessionId = uuidv4()
     const tempDir = join("/tmp", `codelith-${sessionId}`)
@@ -70,20 +83,7 @@ export async function POST(request: NextRequest) {
       await writeFile(filepath, code)
 
       // Prepare execution command
-      let command = langConfig.command
-
-      // Special handling for compiled languages
-      if (language === "java") {
-        // Extract class name from Java code
-        const classNameMatch = code.match(/public\s+class\s+(\w+)/)
-        const className = classNameMatch ? classNameMatch[1] : "Main"
-        command = command.replace("{filename}", filename).replace("{classname}", className)
-      } else if (language === "cpp") {
-        const executable = "program"
-        command = command.replace("{filename}", filename).replace(/{executable}/g, executable)
-      } else {
-        command = `${command} ${filename}`
-      }
+      const command = `${langConfig.command} ${filename}`
 
       // Execute code with timeout
       const { stdout, stderr } = await execPromise(command, {
@@ -92,18 +92,25 @@ export async function POST(request: NextRequest) {
       })
 
       return NextResponse.json({ output: stdout || stderr }, { status: 200 })
+    } catch (error) {
+      console.error("Error executing code:", error)
+
+      // Handle timeout errors
+      if (error.signal === "SIGTERM") {
+        return NextResponse.json({ output: "Execution timed out (limit: 10 seconds)" }, { status: 200 })
+      }
+
+      return NextResponse.json({ output: `Error: ${error.message || "Unknown error occurred"}` }, { status: 200 })
     } finally {
       // Clean up temporary directory
-      await rm(tempDir, { recursive: true, force: true })
+      try {
+        await rm(tempDir, { recursive: true, force: true })
+      } catch (error) {
+        console.error("Error cleaning up temp directory:", error)
+      }
     }
   } catch (error) {
     console.error("Error executing code:", error)
-
-    // Handle timeout errors
-    if (error.signal === "SIGTERM") {
-      return NextResponse.json({ output: "Execution timed out (limit: 10 seconds)" }, { status: 200 })
-    }
-
     return NextResponse.json({ output: `Error: ${error.message || "Unknown error occurred"}` }, { status: 200 })
   }
 }

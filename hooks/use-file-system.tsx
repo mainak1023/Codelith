@@ -2,80 +2,93 @@
 
 import { useState, useEffect } from "react"
 import { v4 as uuidv4 } from "uuid"
-import { useSession } from "next-auth/react"
+import { useAuth } from "@/components/auth-provider"
 import { useToast } from "@/hooks/use-toast"
+import { collection, addDoc, updateDoc, deleteDoc, doc, query, where, onSnapshot } from "firebase/firestore"
+import { db } from "@/lib/firebase"
 
 interface File {
   id: string
   name: string
   content: string
-  projectId?: string
   userId?: string
+  createdAt?: number
+  updatedAt?: number
 }
 
-export function useFileSystem(projectId?: string) {
-  const { data: session } = useSession()
+export function useFileSystem() {
+  const { user } = useAuth()
   const { toast } = useToast()
   const [files, setFiles] = useState<File[]>([])
   const [currentFile, setCurrentFile] = useState<File | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
-  // Load files from API or localStorage on initial render
+  // Load files from Firestore or localStorage on initial render
   useEffect(() => {
     const loadFiles = async () => {
       setLoading(true)
       try {
-        if (session?.user?.id && projectId) {
-          // Load from API if authenticated and project ID is provided
-          const response = await fetch(`/api/files?projectId=${projectId}&userId=${session.user.id}`)
+        if (user) {
+          // Load from Firestore if authenticated
+          const filesRef = collection(db, "files")
+          const q = query(filesRef, where("userId", "==", user.uid))
 
-          if (!response.ok) {
-            throw new Error("Failed to fetch files")
-          }
+          // Set up real-time listener
+          const unsubscribe = onSnapshot(
+            q,
+            (snapshot) => {
+              const loadedFiles = snapshot.docs.map((doc) => ({
+                id: doc.id,
+                ...doc.data(),
+              })) as File[]
 
-          const data = await response.json()
-          setFiles(data.files || [])
+              setFiles(loadedFiles)
 
-          if (data.files && data.files.length > 0) {
-            setCurrentFile(data.files[0])
-          }
+              if (loadedFiles.length > 0 && !currentFile) {
+                setCurrentFile(loadedFiles[0])
+              }
+
+              setLoading(false)
+            },
+            (err) => {
+              console.error("Error loading files:", err)
+              setError("Failed to load files")
+              setLoading(false)
+
+              // Fall back to localStorage
+              loadFromLocalStorage()
+            },
+          )
+
+          return () => unsubscribe()
         } else {
-          // Load from localStorage if not authenticated or no project ID
-          const savedFiles = localStorage.getItem("codelith-files")
-          if (savedFiles) {
-            const parsedFiles = JSON.parse(savedFiles)
-            setFiles(parsedFiles)
-            if (parsedFiles.length > 0) {
-              setCurrentFile(parsedFiles[0])
-            }
-          }
+          // Load from localStorage if not authenticated
+          loadFromLocalStorage()
         }
       } catch (err) {
         console.error("Error loading files:", err)
         setError("Failed to load files")
-        toast({
-          title: "Error",
-          description: "Failed to load files",
-          variant: "destructive",
-        })
 
         // Fall back to localStorage
-        const savedFiles = localStorage.getItem("codelith-files")
-        if (savedFiles) {
-          const parsedFiles = JSON.parse(savedFiles)
-          setFiles(parsedFiles)
-          if (parsedFiles.length > 0) {
-            setCurrentFile(parsedFiles[0])
-          }
-        }
-      } finally {
-        setLoading(false)
+        loadFromLocalStorage()
       }
     }
 
+    const loadFromLocalStorage = () => {
+      const savedFiles = localStorage.getItem("codelith-files")
+      if (savedFiles) {
+        const parsedFiles = JSON.parse(savedFiles)
+        setFiles(parsedFiles)
+        if (parsedFiles.length > 0 && !currentFile) {
+          setCurrentFile(parsedFiles[0])
+        }
+      }
+      setLoading(false)
+    }
+
     loadFiles()
-  }, [session, projectId, toast])
+  }, [user])
 
   // Save files to localStorage whenever they change
   useEffect(() => {
@@ -86,39 +99,38 @@ export function useFileSystem(projectId?: string) {
 
   const createFile = async (name: string, content = "") => {
     try {
-      const newFile = {
-        id: uuidv4(),
-        name,
-        content,
-        projectId,
-        userId: session?.user?.id,
-      }
+      const now = Date.now()
 
-      if (session?.user?.id && projectId) {
-        // Create file in API if authenticated and project ID is provided
-        const response = await fetch("/api/files", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            name,
-            content,
-            userId: session.user.id,
-            projectId,
-          }),
-        })
-
-        if (!response.ok) {
-          throw new Error("Failed to create file")
+      if (user) {
+        // Create file in Firestore if authenticated
+        const newFile = {
+          name,
+          content,
+          userId: user.uid,
+          createdAt: now,
+          updatedAt: now,
         }
 
-        const data = await response.json()
-        setFiles((prevFiles) => [...prevFiles, data.file])
-        setCurrentFile(data.file)
-        return data.file
+        const docRef = await addDoc(collection(db, "files"), newFile)
+
+        const createdFile = {
+          id: docRef.id,
+          ...newFile,
+        }
+
+        // The onSnapshot listener will update the files state
+        setCurrentFile(createdFile)
+        return createdFile
       } else {
-        // Create file locally if not authenticated or no project ID
+        // Create file locally if not authenticated
+        const newFile = {
+          id: uuidv4(),
+          name,
+          content,
+          createdAt: now,
+          updatedAt: now,
+        }
+
         setFiles((prevFiles) => [...prevFiles, newFile])
         setCurrentFile(newFile)
         return newFile
@@ -149,35 +161,25 @@ export function useFileSystem(projectId?: string) {
 
   const updateFile = async (id: string, content: string) => {
     try {
-      if (session?.user?.id && projectId) {
-        // Update file in API if authenticated and project ID is provided
-        const response = await fetch("/api/files", {
-          method: "PUT",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            id,
-            content,
-          }),
+      const now = Date.now()
+
+      if (user) {
+        // Update file in Firestore if authenticated
+        await updateDoc(doc(db, "files", id), {
+          content,
+          updatedAt: now,
         })
 
-        if (!response.ok) {
-          throw new Error("Failed to update file")
-        }
-
-        const data = await response.json()
-        setFiles((prevFiles) => prevFiles.map((file) => (file.id === id ? data.file : file)))
-
+        // The onSnapshot listener will update the files state
         if (currentFile && currentFile.id === id) {
-          setCurrentFile(data.file)
+          setCurrentFile((prev) => (prev ? { ...prev, content, updatedAt: now } : prev))
         }
       } else {
-        // Update file locally if not authenticated or no project ID
-        setFiles((prevFiles) => prevFiles.map((file) => (file.id === id ? { ...file, content } : file)))
+        // Update file locally if not authenticated
+        setFiles((prevFiles) => prevFiles.map((file) => (file.id === id ? { ...file, content, updatedAt: now } : file)))
 
         if (currentFile && currentFile.id === id) {
-          setCurrentFile((prev) => (prev ? { ...prev, content } : prev))
+          setCurrentFile((prev) => (prev ? { ...prev, content, updatedAt: now } : prev))
         }
       }
     } catch (err) {
@@ -189,45 +191,39 @@ export function useFileSystem(projectId?: string) {
       })
 
       // Fall back to local update
-      setFiles((prevFiles) => prevFiles.map((file) => (file.id === id ? { ...file, content } : file)))
+      setFiles((prevFiles) =>
+        prevFiles.map((file) => (file.id === id ? { ...file, content, updatedAt: Date.now() } : file)),
+      )
 
       if (currentFile && currentFile.id === id) {
-        setCurrentFile((prev) => (prev ? { ...prev, content } : prev))
+        setCurrentFile((prev) => (prev ? { ...prev, content, updatedAt: Date.now() } : prev))
       }
     }
   }
 
   const renameFile = async (id: string, newName: string) => {
     try {
-      if (session?.user?.id && projectId) {
-        // Rename file in API if authenticated and project ID is provided
-        const response = await fetch("/api/files", {
-          method: "PUT",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            id,
-            name: newName,
-          }),
+      const now = Date.now()
+
+      if (user) {
+        // Rename file in Firestore if authenticated
+        await updateDoc(doc(db, "files", id), {
+          name: newName,
+          updatedAt: now,
         })
 
-        if (!response.ok) {
-          throw new Error("Failed to rename file")
-        }
-
-        const data = await response.json()
-        setFiles((prevFiles) => prevFiles.map((file) => (file.id === id ? data.file : file)))
-
+        // The onSnapshot listener will update the files state
         if (currentFile && currentFile.id === id) {
-          setCurrentFile(data.file)
+          setCurrentFile((prev) => (prev ? { ...prev, name: newName, updatedAt: now } : prev))
         }
       } else {
-        // Rename file locally if not authenticated or no project ID
-        setFiles((prevFiles) => prevFiles.map((file) => (file.id === id ? { ...file, name: newName } : file)))
+        // Rename file locally if not authenticated
+        setFiles((prevFiles) =>
+          prevFiles.map((file) => (file.id === id ? { ...file, name: newName, updatedAt: now } : file)),
+        )
 
         if (currentFile && currentFile.id === id) {
-          setCurrentFile((prev) => (prev ? { ...prev, name: newName } : prev))
+          setCurrentFile((prev) => (prev ? { ...prev, name: newName, updatedAt: now } : prev))
         }
       }
     } catch (err) {
@@ -239,33 +235,35 @@ export function useFileSystem(projectId?: string) {
       })
 
       // Fall back to local rename
-      setFiles((prevFiles) => prevFiles.map((file) => (file.id === id ? { ...file, name: newName } : file)))
+      setFiles((prevFiles) =>
+        prevFiles.map((file) => (file.id === id ? { ...file, name: newName, updatedAt: Date.now() } : file)),
+      )
 
       if (currentFile && currentFile.id === id) {
-        setCurrentFile((prev) => (prev ? { ...prev, name: newName } : prev))
+        setCurrentFile((prev) => (prev ? { ...prev, name: newName, updatedAt: Date.now() } : prev))
       }
     }
   }
 
   const deleteFile = async (id: string) => {
     try {
-      if (session?.user?.id && projectId) {
-        // Delete file in API if authenticated and project ID is provided
-        const response = await fetch(`/api/files?id=${id}`, {
-          method: "DELETE",
-        })
+      if (user) {
+        // Delete file in Firestore if authenticated
+        await deleteDoc(doc(db, "files", id))
 
-        if (!response.ok) {
-          throw new Error("Failed to delete file")
+        // The onSnapshot listener will update the files state
+        if (currentFile && currentFile.id === id) {
+          const remainingFiles = files.filter((file) => file.id !== id)
+          setCurrentFile(remainingFiles.length > 0 ? remainingFiles[0] : null)
         }
-      }
+      } else {
+        // Delete file locally if not authenticated
+        setFiles((prevFiles) => prevFiles.filter((file) => file.id !== id))
 
-      // Update local state
-      setFiles((prevFiles) => prevFiles.filter((file) => file.id !== id))
-
-      if (currentFile && currentFile.id === id) {
-        const remainingFiles = files.filter((file) => file.id !== id)
-        setCurrentFile(remainingFiles.length > 0 ? remainingFiles[0] : null)
+        if (currentFile && currentFile.id === id) {
+          const remainingFiles = files.filter((file) => file.id !== id)
+          setCurrentFile(remainingFiles.length > 0 ? remainingFiles[0] : null)
+        }
       }
     } catch (err) {
       console.error("Error deleting file:", err)

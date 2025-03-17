@@ -10,17 +10,15 @@ import { Toolbar } from "@/components/toolbar"
 import { StatusBar } from "@/components/status-bar"
 import { FileExplorer } from "@/components/file-explorer"
 import { useFileSystem } from "@/hooks/use-file-system"
-import { useCollaboration } from "@/hooks/use-collaboration"
 import { useKeyboardShortcuts } from "@/hooks/use-keyboard-shortcuts"
 import { useAIAssistant } from "@/hooks/use-ai-assistant"
 import { useToast } from "@/hooks/use-toast"
-import { useSession } from "next-auth/react"
-import { useRouter, useSearchParams } from "next/navigation"
+import { useAuth } from "@/components/auth-provider"
+import { useRouter } from "next/navigation"
 
 export default function CodeEditor() {
-  const { data: session } = useSession()
+  const { user, loading: authLoading } = useAuth()
   const router = useRouter()
-  const searchParams = useSearchParams()
   const { toast } = useToast()
   const { theme } = useTheme()
   const [language, setLanguage] = useState("javascript")
@@ -32,23 +30,15 @@ export default function CodeEditor() {
   const [showTerminal, setShowTerminal] = useState(true)
   const [showFileExplorer, setShowFileExplorer] = useState(true)
   const [fontSize, setFontSize] = useState(14)
-  const [projectId, setProjectId] = useState<string | null>(null)
   const [cursorPosition, setCursorPosition] = useState({ lineNumber: 1, column: 1 })
   const editorRef = useRef(null)
 
-  // Check for collaboration session in URL
+  // Redirect to sign in if not authenticated
   useEffect(() => {
-    const sessionId = searchParams.get("session")
-    if (sessionId && session?.user) {
-      joinSession(sessionId)
+    if (!authLoading && !user) {
+      router.push("/auth/signin")
     }
-  }, [searchParams, session])
-
-  // Initialize project ID
-  useEffect(() => {
-    // In a real app, this would come from the URL or state management
-    setProjectId("default-project")
-  }, [])
+  }, [user, authLoading, router])
 
   const {
     files,
@@ -59,9 +49,7 @@ export default function CodeEditor() {
     deleteFile,
     renameFile,
     selectFile,
-  } = useFileSystem(projectId)
-
-  const { collaborators, shareCode, updateCollaborativeCode, joinSession } = useCollaboration(projectId)
+  } = useFileSystem()
 
   const { registerShortcuts } = useKeyboardShortcuts(editorRef)
   const { getSuggestions, fixErrors, explainCode, optimizeCode, isLoading: aiLoading } = useAIAssistant()
@@ -94,30 +82,6 @@ export default function CodeEditor() {
       setLanguage(getLanguageFromFilename(currentFile.name))
     }
   }, [currentFile])
-
-  // Listen for collaborative updates
-  useEffect(() => {
-    const handleCollaborativeUpdate = (event) => {
-      const { fileId, content, userId } = event.detail
-
-      // Only apply updates from other users
-      if (userId !== session?.user?.id) {
-        // Update the file content
-        updateFile(fileId, content)
-
-        // If this is the current file, update the editor
-        if (currentFile && currentFile.id === fileId) {
-          setCode(content)
-        }
-      }
-    }
-
-    window.addEventListener("collaborative-update", handleCollaborativeUpdate)
-
-    return () => {
-      window.removeEventListener("collaborative-update", handleCollaborativeUpdate)
-    }
-  }, [currentFile, session, updateFile])
 
   const getLanguageFromFilename = (filename) => {
     const extension = filename.split(".").pop()
@@ -179,7 +143,6 @@ export default function CodeEditor() {
     setCode(value)
     if (currentFile) {
       updateFile(currentFile.id, value)
-      updateCollaborativeCode(currentFile.id, value)
     }
   }
 
@@ -402,6 +365,14 @@ export default function CodeEditor() {
     fileInput.click()
   }
 
+  if (authLoading) {
+    return (
+      <div className="flex items-center justify-center h-screen">
+        <div className="animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-primary"></div>
+      </div>
+    )
+  }
+
   return (
     <div className="flex flex-col h-screen">
       <Toolbar
@@ -420,7 +391,6 @@ export default function CodeEditor() {
         onAIAssist={handleAIAssist}
         onExport={exportProject}
         onImport={importProject}
-        onShare={shareCode}
       />
 
       <div className="flex flex-1 overflow-hidden">
@@ -538,12 +508,7 @@ export default function CodeEditor() {
         </div>
       </div>
 
-      <StatusBar
-        language={language}
-        collaborators={collaborators}
-        shareCode={shareCode}
-        cursorPosition={cursorPosition}
-      />
+      <StatusBar language={language} cursorPosition={cursorPosition} user={user} />
     </div>
   )
 }
